@@ -23,46 +23,48 @@ const sx8 = (x) => (x << 24) >> 24;
 
 function run(program, input) {
   const n = program.length;
-  const D = new Int32Array(256);   // data stack
-  const C = new Int32Array(64);    // call stack of return addresses
-  const M = new Int32Array(256);   // 256 words of memory
+  const stack = new Int32Array(256);   // data stack
+  const frames = new Int32Array(64);   // call stack of return addresses
+  const mem = new Int32Array(256);     // 256 words of memory
   const out = new Uint8Array(65536);
   let sp = 0, csp = 0, olen = 0, ip = 0, pc = 0, steps = 0;
-  const done = (e) => ({ out: out.subarray(0, olen), exit: e });
-  const fail = (t) => done(t);
+  const settle = (code) => ({ out: out.subarray(0, olen), exit: code });
+  const trap = (code) => settle(code);
+  const stepLimit = 1000000;
 
   for (;;) {
-    if (steps === 1000000) return fail(10); // step-limit trap: exit 10, partial output kept
-    if (pc < 0 || pc >= n) return fail(9);
+    if (steps === stepLimit) return trap(10); // step-limit trap: exit 10, partial output kept
+    if (pc < 0 || pc >= n) return trap(9);
     const op = program[pc];
     const meta = IMM[op];
-    if (!meta) return fail(5);
+    if (!meta) return trap(5);
     const imm = meta - 1;
-    if (pc + imm >= n) return fail(9);
+    if (pc + imm >= n) return trap(9);
     steps++;
     const next = pc + 1 + imm;
     const pops = POP[op];
     const pushes = PUSH[op];
-    if (sp < pops) return fail(2);
-    if (sp - pops + pushes > 256) return fail(3);
+    const depth = sp - pops + pushes;
+    if (sp < pops) return trap(2);
+    if (depth > 256) return trap(3);
     pc = next;
 
     switch (op) {
-      case 0: return done(0);
-      case 1: D[sp++] = sx8(program[next-1]); break;
+      case 0: return settle(0);
+      case 1: stack[sp++] = sx8(program[next-1]); break;
       // PUSH32: reassemble the little-endian word; the final <<24 lands in bit 31, so the value wraps to signed i32.
       case 2: {
         const v = program[next - 4] | (program[next - 3] << 8) | (program[next - 2] << 16) | (program[next - 1] << 24);
-        D[sp++] = v;
+        stack[sp++] = v;
         break;
       }
       case 3: sp--; break;
-      case 4: D[sp] = D[sp-1]; sp++; break;
-      case 5: { const t = D[sp-1]; D[sp-1] = D[sp-2]; D[sp-2] = t; break; }
-      case 6: D[sp] = D[sp-2]; sp++; break;
-      case 7: { const t = D[sp-3]; D[sp-3] = D[sp-2]; D[sp-2] = D[sp-1]; D[sp-1] = t; break; }
-      case 0x17: D[sp-1] = -D[sp-1] | 0; break;
-      case 0x1b: D[sp-1] = ~D[sp-1]; break;
+      case 4: stack[sp] = stack[sp-1]; sp++; break;
+      case 5: { const t = stack[sp-1]; stack[sp-1] = stack[sp-2]; stack[sp-2] = t; break; }
+      case 6: stack[sp] = stack[sp-2]; sp++; break;
+      case 7: { const t = stack[sp-3]; stack[sp-3] = stack[sp-2]; stack[sp-2] = stack[sp-1]; stack[sp-1] = t; break; }
+      case 0x17: stack[sp-1] = -stack[sp-1] | 0; break;
+      case 0x1b: stack[sp-1] = ~stack[sp-1]; break;
       case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16:
       case 0x18: case 0x19: case 0x1a: case 0x1c: case 0x1d: case 0x1e:
       case 0x20: case 0x21: case 0x22: {
@@ -73,16 +75,17 @@ function run(program, input) {
         //   DIVU/MODU reinterpret both operands as unsigned, then read the result back as signed;
         //   shifts use only the low 5 bits of the count (b & 31), SHR is arithmetic, SHRU logical;
         //   LTU compares as unsigned while LT compares as signed. Any divide by zero traps with code 4.
-        const b = D[sp-1], a = D[sp-2];
+        const b = stack[sp - 1];
+        const a = stack[sp - 2];
         let r = 0;
         switch (op) {
           case 0x10: r = (a + b) | 0; break;
           case 0x11: r = (a - b) | 0; break;
           case 0x12: r = Math.imul(a, b); break;
-          case 0x13: if (!b) return fail(4); r = a === -2147483648 && b === -1 ? a : (a / b) | 0; break;
-          case 0x14: if (!b) return fail(4); r = b === -1 ? 0 : (a % b) | 0; break;
-          case 0x15: if (!b) return fail(4); r = Math.floor((a >>> 0) / (b >>> 0)) | 0; break;
-          case 0x16: if (!b) return fail(4); r = ((a >>> 0) % (b >>> 0)) | 0; break;
+          case 0x13: if (!b) return trap(4); r = a === -2147483648 && b === -1 ? a : (a / b) | 0; break;
+          case 0x14: if (!b) return trap(4); r = b === -1 ? 0 : (a % b) | 0; break;
+          case 0x15: if (!b) return trap(4); r = Math.floor((a >>> 0) / (b >>> 0)) | 0; break;
+          case 0x16: if (!b) return trap(4); r = ((a >>> 0) % (b >>> 0)) | 0; break;
           case 0x18: r = a & b; break;
           case 0x19: r = a | b; break;
           case 0x1a: r = a ^ b; break;
@@ -93,30 +96,30 @@ function run(program, input) {
           case 0x21: r = a < b ? 1 : 0; break;
           case 0x22: r = (a >>> 0) < (b >>> 0) ? 1 : 0; break;
         }
-        sp -= 2; D[sp++] = r;
+        sp -= 2; stack[sp++] = r;
         break;
       }
       case 0x30: case 0x31: case 0x32: {
         const rel = ((program[next-2] | (program[next-1] << 8)) << 16) >> 16;
         let take = op === 0x30;
-        if (!take) { const v = D[--sp]; take = op === 0x31 ? v === 0 : v !== 0; }
+        if (!take) { const v = stack[--sp]; take = op === 0x31 ? v === 0 : v !== 0; }
         if (take) pc = next + rel;
         break;
       }
-      case 0x33: if (csp === 64) return fail(7); C[csp++] = next; pc = program[next-2] | (program[next-1] << 8); break;
-      case 0x34: if (!csp) return fail(8); pc = C[--csp]; break;
-      case 0x40: { const addr = D[sp-1]; if (addr < 0 || addr > 255) return fail(6); D[sp-1] = M[addr]; break; }
-      case 0x41: { const addr = D[sp-1], v = D[sp-2]; if (addr < 0 || addr > 255) return fail(6); sp -= 2; M[addr] = v; break; }
+      case 0x33: if (csp === 64) return trap(7); frames[csp++] = next; pc = program[next-2] | (program[next-1] << 8); break;
+      case 0x34: if (!csp) return trap(8); pc = frames[--csp]; break;
+      case 0x40: { const addr = stack[sp-1]; if (addr < 0 || addr > 255) return trap(6); stack[sp-1] = mem[addr]; break; }
+      case 0x41: { const addr = stack[sp-1], v = stack[sp-2]; if (addr < 0 || addr > 255) return trap(6); sp -= 2; mem[addr] = v; break; }
       case 0x50: {
-        const s = String(D[sp-1]);
-        if (olen + s.length > 65536) return fail(11);
+        const s = String(stack[sp-1]);
+        if (olen + s.length > 65536) return trap(11);
         sp--;
         for (let k = 0; k < s.length; k++) out[olen++] = s.charCodeAt(k);
         break;
       }
-      case 0x51: if (olen + 1 > 65536) return fail(11); out[olen++] = D[--sp] & 255; break;
-      case 0x52: D[sp++] = ip < input.length ? input[ip++] : -1; break;
-      case 0x53: return done(D[--sp] & 255);
+      case 0x51: if (olen + 1 > 65536) return trap(11); out[olen++] = stack[--sp] & 255; break;
+      case 0x52: stack[sp++] = ip < input.length ? input[ip++] : -1; break;
+      case 0x53: return settle(stack[--sp] & 255);
     }
   }
 }
