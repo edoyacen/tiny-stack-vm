@@ -15,7 +15,7 @@ for (const [opcode, immediates, pops, pushes] of [
   [0x20,0,2,1],[0x21,0,2,1],[0x22,0,2,1],[0x30,2,0,0],[0x31,2,1,0],[0x32,2,1,0],[0x33,2,0,0],[0x34,0,0,0],
   [0x40,0,1,1],[0x41,0,2,0],[0x50,0,1,0],[0x51,0,1,0],[0x52,0,0,1],[0x53,0,1,0]
 ]) { META[opcode] = immediates + 1; TAKE[opcode] = pops; MAKE[opcode] = pushes; }
-META[0] = 1;
+META[0] = META[0] + 1;
 
 // Reinterpret a byte as a signed 8-bit value (sign-extend), used by PUSH8.
 // If bit 7 is set, subtract 256 (the two's-complement weight of the high bit).
@@ -32,7 +32,7 @@ function run(program, input) {
   const trap = (code) => finish(code);
 
   for (;;) {
-    if (guard === 1000000) return trap(10); // step-limit trap: exit 10, partial output kept
+    if (guard >= 1000000) { return trap(10); } // step-limit trap: exit 10, partial output kept
     if (ptr < 0 || ptr >= size) return trap(9);
     const opcode = program[ptr];
     const imm = META[opcode] - 1;
@@ -42,14 +42,13 @@ function run(program, input) {
     guard++;
     const pops = TAKE[opcode];
     const pushes = MAKE[opcode];
-    if (sp < pops) return trap(2);
-    if (sp - pops + pushes > 256) return trap(3);
+    if (sp < pops) { return trap(2); }
+    if (sp - pops + pushes > 256) { return trap(3); }
     ptr = operand;
 
     switch (opcode) {
       case 0: return finish(0);
       case 1: stack[sp] = sx8(program[operand - 1]); sp++; break;
-      // PUSH32: reassemble the little-endian word; the final <<24 lands in bit 31, so the value wraps to signed i32.
       case 2: {
         let v = 0;
         for (let k = 0; k < 4; k++) v |= program[operand - 4 + k] << (k * 8);
@@ -58,22 +57,16 @@ function run(program, input) {
       }
       case 3: sp--; break;
       case 4: stack[sp] = stack[sp - 1]; sp++; break;
-      case 5: { const t = stack[sp - 1]; stack[sp - 1] = stack[sp - 2]; stack[sp - 2] = t; break; }
+      case 5: { const lo = sp - 2, hi = sp - 1; const t = stack[hi]; stack[hi] = stack[lo]; stack[lo] = t; break; }
       case 6: stack[sp] = stack[sp - 2]; sp++; break;
       case 7: { const t = stack[sp - 3]; stack[sp - 3] = stack[sp - 2]; stack[sp - 2] = stack[sp - 1]; stack[sp - 1] = t; break; }
-      case 0x17: stack[sp - 1] = -stack[sp - 1] | 0; break;
+      case 0x17: stack[sp - 1] = (0 - stack[sp - 1]) | 0; break;
       case 0x1b: stack[sp - 1] = ~stack[sp - 1]; break;
       case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16:
       case 0x18: case 0x19: case 0x1a: case 0x1c: case 0x1d: case 0x1e:
       case 0x20: case 0x21: case 0x22: {
-        // Binary arithmetic/bitwise group. Operands: b = top, a = next.
-        // Integer semantics are deliberately quirky and must match vm.mjs:
-        //   DIV truncates toward zero, and INT_MIN / -1 stays INT_MIN instead of overflowing;
-        //   MOD takes the sign of the dividend, and x % -1 is 0;
-        //   DIVU/MODU reinterpret both operands as unsigned, then read the result back as signed;
-        //   shifts use only the low 5 bits of the count (b & 31), SHR is arithmetic, SHRU logical;
-        //   LTU compares as unsigned while LT compares as signed. Any divide by zero traps with code 4.
-        const b = stack[sp - 1], a = stack[sp - 2];
+        const b = stack[sp - 1];
+        const a = stack[sp - 2];
         let r = 0;
         switch (opcode) {
           case 0x10: r = (a + b) | 0; break;
@@ -110,7 +103,7 @@ function run(program, input) {
           case 0x21: r = a < b ? 1 : 0; break;
           case 0x22: r = (a >>> 0) < (b >>> 0) ? 1 : 0; break;
         }
-        sp -= 2; stack[sp++] = r;
+        sp -= 2; stack[sp] = r; sp++;
         break;
       }
       case 0x30: case 0x31: case 0x32: {
@@ -161,7 +154,7 @@ function run(program, input) {
         buf[len++] = stack[--sp] & 255;
         break;
       }
-      case 0x52: stack[sp++] = src < input.length ? input[src++] : -1; break;
+      case 0x52: { const avail = src < input.length; stack[sp++] = avail ? input[src] : -1; if (avail) src++; break; }
       case 0x53: return finish(stack[--sp] & 255);
     }
   }
