@@ -1,7 +1,13 @@
-// Tiny stack VM: byte-exact semantics of make.fun's reference vm.mjs.
+// Tiny stack VM for make.fun's tiny-stack ISA v1.
+// Executes each program.bin with its input.bin and emits byte-exact stdout plus exit code.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-const I = process.env.MAKEFUN_INPUT_DIR ?? '/input', O = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+const I = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+const O = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+// Per-opcode metadata: immediate byte count (+1, 0 means unknown opcode),
+// values popped, values pushed.
 const IMM = new Uint8Array(256), POP = new Uint8Array(256), PUSH = new Uint8Array(256);
 for (const [o, i, p, q] of [
   [1,1,0,1],[2,4,0,1],[3,0,1,0],[4,0,1,2],[5,0,2,2],[6,0,2,3],[7,0,3,3],
@@ -11,10 +17,20 @@ for (const [o, i, p, q] of [
   [0x40,0,1,1],[0x41,0,2,0],[0x50,0,1,0],[0x51,0,1,0],[0x52,0,0,1],[0x53,0,1,0]
 ]) { IMM[o] = i + 1; POP[o] = p; PUSH[o] = q; }
 IMM[0] = 1;
+
+// Reinterpret a byte as a signed 8-bit value (sign-extend), used by PUSH8.
+const sx8 = (x) => (x << 24) >> 24;
+
 function run(program, input) {
-  const n = program.length, D = new Int32Array(256), C = new Int32Array(64), M = new Int32Array(256), out = new Uint8Array(65536);
+  const n = program.length;
+  const D = new Int32Array(256);   // data stack
+  const C = new Int32Array(64);    // call stack of return addresses
+  const M = new Int32Array(256);   // 256 words of memory
+  const out = new Uint8Array(65536);
   let sp = 0, csp = 0, olen = 0, ip = 0, pc = 0, steps = 0;
-  const done = (e) => ({ out: out.subarray(0, olen), exit: e }), fail = (t) => done(t);
+  const done = (e) => ({ out: out.subarray(0, olen), exit: e });
+  const fail = (t) => done(t);
+
   for (;;) {
     if (steps === 1000000) return fail(10); // step-limit trap: exit 10, partial output kept
     if (pc < 0 || pc >= n) return fail(9);
@@ -27,10 +43,11 @@ function run(program, input) {
     if (sp < POP[op]) return fail(2);
     if (sp - POP[op] + PUSH[op] > 256) return fail(3);
     pc = next;
+
     switch (op) {
       case 0: return done(0);
-      case 1: D[sp++] = (program[next-1] << 24) >> 24; break;
-      // i32.const: reassemble little-endian, final <<24 lands in bit 31 so the value wraps to signed 32-bit
+      case 1: D[sp++] = sx8(program[next-1]); break;
+      // PUSH32: reassemble little-endian; the final <<24 lands in bit 31 so the value wraps to signed i32.
       case 2: D[sp++] = program[next-4] | (program[next-3] << 8) | (program[next-2] << 16) | (program[next-1] << 24); break;
       case 3: sp--; break;
       case 4: D[sp] = D[sp-1]; sp++; break;
@@ -42,7 +59,15 @@ function run(program, input) {
       case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16:
       case 0x18: case 0x19: case 0x1a: case 0x1c: case 0x1d: case 0x1e:
       case 0x20: case 0x21: case 0x22: {
-        const b = D[sp-1], a = D[sp-2]; let r = 0;
+        // Binary arithmetic/bitwise group. Operands: b = top, a = next.
+        // Integer semantics are deliberately quirky and must match vm.mjs:
+        //   DIV truncates toward zero, and INT_MIN / -1 stays INT_MIN instead of overflowing;
+        //   MOD takes the sign of the dividend, and x % -1 is 0;
+        //   DIVU/MODU reinterpret both operands as unsigned, then read the result back as signed;
+        //   shifts use only the low 5 bits of the count (b & 31), SHR is arithmetic, SHRU logical;
+        //   LTU compares as unsigned while LT compares as signed. Any divide by zero traps with code 4.
+        const b = D[sp-1], a = D[sp-2];
+        let r = 0;
         switch (op) {
           case 0x10: r = (a + b) | 0; break;
           case 0x11: r = (a - b) | 0; break;
@@ -61,7 +86,8 @@ function run(program, input) {
           case 0x21: r = a < b ? 1 : 0; break;
           case 0x22: r = (a >>> 0) < (b >>> 0) ? 1 : 0; break;
         }
-        sp -= 2; D[sp++] = r; break;
+        sp -= 2; D[sp++] = r;
+        break;
       }
       case 0x30: case 0x31: case 0x32: {
         const rel = ((program[next-2] | (program[next-1] << 8)) << 16) >> 16;
@@ -87,6 +113,7 @@ function run(program, input) {
     }
   }
 }
+
 for (const id of readdirSync(I).sort()) {
   mkdirSync(join(O, id), { recursive: true });
   const r = run(readFileSync(join(I, id, 'program.bin')), readFileSync(join(I, id, 'input.bin')));
