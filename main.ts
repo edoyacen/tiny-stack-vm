@@ -16,7 +16,7 @@ function run(program, input) {
   let sp = 0, csp = 0, olen = 0, ip = 0, pc = 0, steps = 0;
   const done = (e) => ({ out: out.subarray(0, olen), exit: e }), fail = (t) => done(t);
   for (;;) {
-    if (steps === 1000000) return fail(10);
+    if (steps === 1000000) return fail(10); // step-limit trap: exit 10, partial output kept
     if (pc < 0 || pc >= n) return fail(9);
     const op = program[pc];
     if (!IMM[op]) return fail(5);
@@ -30,6 +30,7 @@ function run(program, input) {
     switch (op) {
       case 0: return done(0);
       case 1: D[sp++] = (program[next-1] << 24) >> 24; break;
+      // i32.const: reassemble little-endian, final <<24 lands in bit 31 so the value wraps to signed 32-bit
       case 2: D[sp++] = program[next-4] | (program[next-3] << 8) | (program[next-2] << 16) | (program[next-1] << 24); break;
       case 3: sp--; break;
       case 4: D[sp] = D[sp-1]; sp++; break;
