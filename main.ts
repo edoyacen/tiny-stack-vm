@@ -35,20 +35,27 @@ function run(program, input) {
     if (steps === 1000000) return fail(10); // step-limit trap: exit 10, partial output kept
     if (pc < 0 || pc >= n) return fail(9);
     const op = program[pc];
-    if (!IMM[op]) return fail(5);
-    const imm = IMM[op] - 1;
+    const meta = IMM[op];
+    if (!meta) return fail(5);
+    const imm = meta - 1;
     if (pc + imm >= n) return fail(9);
     steps++;
     const next = pc + 1 + imm;
-    if (sp < POP[op]) return fail(2);
-    if (sp - POP[op] + PUSH[op] > 256) return fail(3);
+    const pops = POP[op];
+    const pushes = PUSH[op];
+    if (sp < pops) return fail(2);
+    if (sp - pops + pushes > 256) return fail(3);
     pc = next;
 
     switch (op) {
       case 0: return done(0);
       case 1: D[sp++] = sx8(program[next-1]); break;
-      // PUSH32: reassemble little-endian; the final <<24 lands in bit 31 so the value wraps to signed i32.
-      case 2: D[sp++] = program[next-4] | (program[next-3] << 8) | (program[next-2] << 16) | (program[next-1] << 24); break;
+      // PUSH32: reassemble the little-endian word; the final <<24 lands in bit 31, so the value wraps to signed i32.
+      case 2: {
+        const v = program[next - 4] | (program[next - 3] << 8) | (program[next - 2] << 16) | (program[next - 1] << 24);
+        D[sp++] = v;
+        break;
+      }
       case 3: sp--; break;
       case 4: D[sp] = D[sp-1]; sp++; break;
       case 5: { const t = D[sp-1]; D[sp-1] = D[sp-2]; D[sp-2] = t; break; }
@@ -116,7 +123,9 @@ function run(program, input) {
 
 for (const id of readdirSync(I).sort()) {
   mkdirSync(join(O, id), { recursive: true });
-  const r = run(readFileSync(join(I, id, 'program.bin')), readFileSync(join(I, id, 'input.bin')));
-  writeFileSync(join(O, id, 'stdout.bin'), r.out);
-  writeFileSync(join(O, id, 'exit.txt'), String(r.exit) + '\n');
+  const program = readFileSync(join(I, id, 'program.bin'));
+  const data = readFileSync(join(I, id, 'input.bin'));
+  const result = run(program, data);
+  writeFileSync(join(O, id, 'stdout.bin'), result.out);
+  writeFileSync(join(O, id, 'exit.txt'), String(result.exit) + '\n');
 }
